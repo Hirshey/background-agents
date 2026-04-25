@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import time
@@ -51,11 +52,13 @@ class SandboxSupervisor:
     DEFAULT_START_TIMEOUT_SECONDS = 120
     CLONE_DEPTH_COMMITS = 100
     SIDECAR_TIMEOUT_SECONDS = 5
+    DOCKER_START_TIMEOUT_SECONDS = 30
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
 
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
+        self.docker_process: asyncio.subprocess.Process | None = None
         self.code_server_process: asyncio.subprocess.Process | None = None
         self.ttyd_process: asyncio.subprocess.Process | None = None
         self.ttyd_proxy_process: asyncio.subprocess.Process | None = None
@@ -627,6 +630,86 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("ttyd_proxy.log_forward_error", exc=e)
 
+    async def _docker_ready(self, timeout_seconds: float = 3.0) -> bool:
+        """Return True when the Docker daemon responds to the CLI."""
+        if shutil.which("docker") is None:
+            return False
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "info",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=os.environ.copy(),
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            return proc.returncode == 0
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False
+        except Exception:
+            return False
+
+    async def start_docker(self) -> None:
+        """Start Docker Engine for local database stacks such as Supabase."""
+        if os.environ.get("OPENINSPECT_DOCKER_ENABLED") != "true":
+            self.log.info("docker.skip", reason="OPENINSPECT_DOCKER_ENABLED not true")
+            return
+
+        if await self._docker_ready():
+            self.log.info("docker.ready", source="existing")
+            return
+
+        if shutil.which("dockerd") is None:
+            self.log.warn("docker.skip", reason="dockerd_not_found")
+            return
+
+        storage_driver = os.environ.get("DOCKERD_STORAGE_DRIVER", "vfs")
+        extra_args = shlex.split(os.environ.get("DOCKERD_EXTRA_ARGS", ""))
+        cmd = [
+            "dockerd",
+            "--host=unix:///var/run/docker.sock",
+            f"--storage-driver={storage_driver}",
+            *extra_args,
+        ]
+
+        Path("/var/run").mkdir(parents=True, exist_ok=True)
+        Path("/var/lib/docker").mkdir(parents=True, exist_ok=True)
+
+        self.log.info("docker.starting", storage_driver=storage_driver)
+        self.docker_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+        asyncio.create_task(self._forward_docker_logs())
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.DOCKER_START_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            if await self._docker_ready(timeout_seconds=1.0):
+                self.log.info("docker.ready", source="started", pid=self.docker_process.pid)
+                return
+            if self.docker_process.returncode is not None:
+                raise RuntimeError(f"dockerd exited with code {self.docker_process.returncode}")
+            await asyncio.sleep(0.5)
+
+        raise RuntimeError("dockerd did not become ready")
+
+    async def _forward_docker_logs(self) -> None:
+        """Forward Docker daemon stdout to structured logs."""
+        if not self.docker_process or not self.docker_process.stdout:
+            return
+
+        try:
+            async for line in self.docker_process.stdout:
+                self.log.info("docker.stdout", line=line.decode().rstrip())
+        except Exception as e:
+            self.log.warn("docker.log_forward_error", exc=e)
+
     async def _wait_for_port(self, port: int, timeout_seconds: float | None = None) -> bool:
         timeout_seconds = timeout_seconds or self.SIDECAR_TIMEOUT_SECONDS
         """Wait for a service to start listening on a port. Returns True if ready."""
@@ -823,6 +906,7 @@ class SandboxSupervisor:
         """Monitor child processes and restart on crash."""
         restart_count = 0
         bridge_restart_count = 0
+        docker_restart_count = 0
         code_server_restart_count = 0
         ttyd_restart_count = 0
         ttyd_proxy_restart_count = 0
@@ -903,6 +987,27 @@ class SandboxSupervisor:
                     )
                     await asyncio.sleep(delay)
                     await self.start_bridge()
+
+            # Check Docker Engine (non-fatal, best-effort restart)
+            if self.docker_process and self.docker_process.returncode is not None:
+                docker_restart_count += 1
+                self.log.warn(
+                    "docker.crash",
+                    exit_code=self.docker_process.returncode,
+                    restart_count=docker_restart_count,
+                )
+
+                if docker_restart_count <= self.MAX_RESTARTS:
+                    delay = min(self.BACKOFF_BASE**docker_restart_count, self.BACKOFF_MAX)
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.start_docker()
+                    except Exception as e:
+                        self.log.warn("docker.restart_failed", exc=e)
+                        self.docker_process = None
+                else:
+                    self.log.warn("docker.max_restarts", restart_count=docker_restart_count)
+                    self.docker_process = None
 
             # Check code-server process (non-fatal, best-effort restart)
             if self.code_server_process and self.code_server_process.returncode is not None:
@@ -1193,6 +1298,17 @@ class SandboxSupervisor:
                 if image_build_mode and not setup_success:
                     raise RuntimeError("setup hook failed in build mode")
 
+            # Start Docker before repo runtime hooks so start.sh can launch
+            # Docker-backed services such as Supabase.
+            if (
+                self.boot_mode != "build"
+                and os.environ.get("OPENINSPECT_DOCKER_AUTOSTART") == "true"
+            ):
+                try:
+                    await self.start_docker()
+                except Exception as e:
+                    self.log.warn("docker.start_failed", exc=e)
+
             # Phase 3: Run runtime start hook for all non-build boots.
             start_success: bool | None = None
             if self.boot_mode != "build":
@@ -1289,6 +1405,14 @@ class SandboxSupervisor:
                 await asyncio.wait_for(self.code_server_process.wait(), timeout=5.0)
             except TimeoutError:
                 self.code_server_process.kill()
+
+        # Terminate Docker Engine before exiting the sandbox.
+        if self.docker_process and self.docker_process.returncode is None:
+            self.docker_process.terminate()
+            try:
+                await asyncio.wait_for(self.docker_process.wait(), timeout=5.0)
+            except TimeoutError:
+                self.docker_process.kill()
 
         # Terminate ttyd proxy first (it depends on ttyd)
         if self.ttyd_proxy_process and self.ttyd_proxy_process.returncode is None:

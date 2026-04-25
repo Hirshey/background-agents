@@ -129,6 +129,38 @@ async def test_no_llm_secrets(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enables_modal_docker_by_default(monkeypatch):
+    """Build sandboxes should enable Modal Docker-in-Sandbox support."""
+    captured = {}
+    monkeypatch.setattr("src.sandbox.manager.modal.Sandbox.create", _fake_sandbox_create(captured))
+    monkeypatch.delenv("MODAL_DOCKER_ENABLED", raising=False)
+
+    manager = SandboxManager()
+    await manager.create_build_sandbox(
+        repo_owner="acme",
+        repo_name="my-repo",
+    )
+
+    assert captured["kwargs"]["experimental_options"] == {"enable_docker": True}
+
+
+@pytest.mark.asyncio
+async def test_can_disable_modal_docker(monkeypatch):
+    """Operators can opt out of Modal Docker alpha support with an env var."""
+    captured = {}
+    monkeypatch.setattr("src.sandbox.manager.modal.Sandbox.create", _fake_sandbox_create(captured))
+    monkeypatch.setenv("MODAL_DOCKER_ENABLED", "false")
+
+    manager = SandboxManager()
+    await manager.create_build_sandbox(
+        repo_owner="acme",
+        repo_name="my-repo",
+    )
+
+    assert "experimental_options" not in captured["kwargs"]
+
+
+@pytest.mark.asyncio
 async def test_sandbox_id_format(monkeypatch):
     """Sandbox ID should match build-{owner}-{repo}-{timestamp} format."""
     captured = {}

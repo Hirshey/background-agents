@@ -202,11 +202,14 @@ See **[docs/AUTOMATIONS.md](docs/AUTOMATIONS.md)** for setup instructions.
 
 ### Sandbox Environment
 
-Every session runs in an isolated Modal sandbox with a full development environment:
+Every session runs in an isolated sandbox with a full development environment:
 
-- **Pre-installed:** Node.js 22, Python 3.12, Bun, git, GitHub CLI, build-essential
+- **Pre-installed:** Node.js 22, Python 3.12, Bun, git, GitHub CLI, build-essential, Docker
+  Engine, Supabase CLI
 - **Browser automation:** agent-browser CLI with headless Chromium for screenshots, visual diffs,
   and UI verification
+- **Local database testing:** agents can run `openinspect-supabase-start` from repositories with
+  Supabase config before local DB E2E tests
 - **Code-server:** Optional browser-based VS Code connected to the session workspace
 - **Web terminal:** ttyd-powered terminal accessible from the session UI
 - **Port tunneling:** Expose up to 10 dev server ports via encrypted tunnels

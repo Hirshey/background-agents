@@ -28,13 +28,16 @@ CODE_SERVER_VERSION = "4.109.5"
 # agent-browser version to install (pinned for reproducible images)
 AGENT_BROWSER_VERSION = "0.21.2"
 
+# Supabase CLI version to install. "latest" resolves through the GitHub release redirect at build time.
+SUPABASE_CLI_VERSION = "latest"
+
 # ttyd version to install (pinned for reproducible images)
 TTYD_VERSION = "1.7.7"
 TTYD_SHA256 = "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55"
 
 # Cache buster - change this to force Modal image rebuild
-# v46: pre-build OpenCode plugin deps to avoid first-prompt reify
-CACHE_BUSTER = "v46-prebuilt-deps"
+# v47: add Docker Engine + Supabase CLI for local database E2E testing
+CACHE_BUSTER = "v47-supabase-local-db"
 
 # Base image with all development tools
 base_image = (
@@ -74,6 +77,20 @@ base_image = (
         " https://cli.github.com/packages stable main'"
         " > /etc/apt/sources.list.d/github-cli.list",
         "apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*",
+    )
+    # Install Docker Engine. Supabase local development uses Docker containers.
+    .run_commands(
+        "install -m 0755 -d /etc/apt/keyrings",
+        "curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc",
+        "chmod a+r /etc/apt/keyrings/docker.asc",
+        "printf 'Types: deb\\nURIs: https://download.docker.com/linux/debian\\n"
+        "Suites: %s\\nComponents: stable\\nArchitectures: %s\\n"
+        "Signed-By: /etc/apt/keyrings/docker.asc\\n' "
+        '"$(. /etc/os-release && echo "$VERSION_CODENAME")" "$(dpkg --print-architecture)" '
+        "> /etc/apt/sources.list.d/docker.sources",
+        "apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io "
+        "docker-buildx-plugin docker-compose-plugin && rm -rf /var/lib/apt/lists/*",
+        "docker --version",
     )
     # Install Node.js 22 LTS
     .run_commands(
@@ -149,6 +166,16 @@ base_image = (
         "agent-browser install",
         "agent-browser --version",
     )
+    # Install Supabase standalone CLI for global usage. npm -g is not supported by Supabase.
+    .run_commands(
+        f"curl -fsSL -o /tmp/supabase.tar.gz "
+        f"https://github.com/supabase/cli/releases/{SUPABASE_CLI_VERSION}/download/"
+        "supabase_linux_amd64.tar.gz",
+        "tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin supabase",
+        "chmod +x /usr/local/bin/supabase",
+        "rm /tmp/supabase.tar.gz",
+        "supabase --version",
+    )
     # Create working directories
     .run_commands(
         "mkdir -p /workspace",
@@ -167,6 +194,11 @@ base_image = (
             "SANDBOX_VERSION": CACHE_BUSTER,
             # NODE_PATH for globally installed modules (used by custom tools)
             "NODE_PATH": "/usr/lib/node_modules",
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "OPENINSPECT_DOCKER_ENABLED": "true",
+            "OPENINSPECT_DOCKER_AUTOSTART": "true",
+            "SUPABASE_TELEMETRY_DISABLED": "1",
+            "DO_NOT_TRACK": "1",
         }
     )
     # Add sandbox runtime code to the image (provider-agnostic bridge, entrypoint, tools, plugins)

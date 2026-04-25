@@ -31,6 +31,7 @@ log = get_logger("manager")
 
 DEFAULT_SANDBOX_TIMEOUT_SECONDS = 7200  # 2 hours
 MAX_TUNNEL_PORTS = 10
+MODAL_DOCKER_ENABLED_ENV = "MODAL_DOCKER_ENABLED"
 
 
 @dataclass
@@ -222,6 +223,13 @@ class SandboxManager:
                 env_vars["GITHUB_APP_TOKEN"] = clone_token
                 env_vars["GITHUB_TOKEN"] = clone_token
 
+    @staticmethod
+    def _enable_modal_docker(create_kwargs: dict) -> None:
+        """Enable Modal's Docker-in-Sandbox support unless explicitly disabled."""
+        if os.environ.get(MODAL_DOCKER_ENABLED_ENV, "true") != "true":
+            return
+        create_kwargs["experimental_options"] = {"enable_docker": True}
+
     async def create_sandbox(
         self,
         config: SandboxConfig,
@@ -297,6 +305,7 @@ class SandboxManager:
             "workdir": "/workspace",
             "env": env_vars,
         }
+        self._enable_modal_docker(create_kwargs)
         exposed_ports, tunnel_ports = self._collect_exposed_ports(
             config.code_server_enabled, terminal_enabled, config.settings
         )
@@ -383,16 +392,21 @@ class SandboxManager:
 
         self._inject_vcs_env_vars(env_vars, clone_token or None)
 
+        create_kwargs: dict = {
+            "image": base_image,
+            "app": app,
+            "secrets": [],
+            "timeout": BUILD_TIMEOUT_SECONDS,
+            "workdir": "/workspace",
+            "env": env_vars,
+        }
+        self._enable_modal_docker(create_kwargs)
+
         sandbox = await modal.Sandbox.create.aio(
             "python",
             "-m",
             "sandbox_runtime.entrypoint",
-            image=base_image,
-            app=app,
-            secrets=[],
-            timeout=BUILD_TIMEOUT_SECONDS,
-            workdir="/workspace",
-            env=env_vars,
+            **create_kwargs,
         )
 
         modal_object_id = sandbox.object_id
@@ -609,6 +623,7 @@ class SandboxManager:
             "workdir": "/workspace",
             "env": env_vars,
         }
+        self._enable_modal_docker(create_kwargs)
         exposed_ports, tunnel_ports = self._collect_exposed_ports(
             code_server_enabled, terminal_enabled, settings
         )
