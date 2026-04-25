@@ -247,6 +247,8 @@ docker compose up -d postgres redis
 - `setup.sh` failures are non-fatal for fresh sessions, but fatal in image build mode
 - `start.sh` runs for every non-build session startup (fresh, repo-image, snapshot-restore)
 - `start.sh` failures are strict: if present and it fails, session startup fails
+- Hooks can persist environment overrides for later agent commands by writing dotenv-style entries
+  to `.openinspect/env`
 - Default timeouts:
   - `SETUP_TIMEOUT_SECONDS` (default `300`)
   - `START_TIMEOUT_SECONDS` (default `120`)

@@ -51,6 +51,7 @@ class SandboxSupervisor:
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
     DEFAULT_START_TIMEOUT_SECONDS = 120
     CLONE_DEPTH_COMMITS = 100
+    HOOK_ENV_PATH = ".openinspect/env"
     SIDECAR_TIMEOUT_SECONDS = 5
     DOCKER_START_TIMEOUT_SECONDS = 30
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
@@ -1100,6 +1101,38 @@ class SandboxSupervisor:
         env["OPENINSPECT_BOOT_MODE"] = self.boot_mode
         return env
 
+    def _load_hook_env_file(self) -> None:
+        """Load environment overrides written by repo hooks."""
+        env_path = self.repo_path / self.HOOK_ENV_PATH
+        if not env_path.exists():
+            return
+
+        loaded_keys: list[str] = []
+        for line in env_path.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[len("export ") :].strip()
+            if "=" not in stripped:
+                continue
+
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                self.log.warn("hook.env_invalid_key", key=key)
+                continue
+
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+
+            os.environ[key] = value
+            loaded_keys.append(key)
+
+        if loaded_keys:
+            self.log.info("hook.env_loaded", path=str(env_path), keys=loaded_keys)
+
     async def _run_hook(
         self,
         *,
@@ -1172,6 +1205,7 @@ class SandboxSupervisor:
             duration_ms = int((time.time() - start_time) * 1000)
 
             if process.returncode == 0:
+                self._load_hook_env_file()
                 # Avoid logging hook stdout at info level to reduce secret exposure risk.
                 self.log.info(
                     f"{hook_name}.complete",

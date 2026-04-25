@@ -1,6 +1,7 @@
 """Tests for SandboxSupervisor.run_start_script() and strict startup integration."""
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from sandbox_runtime.entrypoint import SandboxSupervisor
@@ -110,6 +111,42 @@ class TestStartScriptSuccess:
 
         env_arg = mock_exec.call_args[1]["env"]
         assert env_arg["OPENINSPECT_BOOT_MODE"] == "repo_image"
+
+    async def test_loads_hook_env_file_after_success(self, tmp_path):
+        sup = _make_supervisor(tmp_path)
+        _create_start_script(sup.repo_path)
+        hook_env = sup.repo_path / ".openinspect" / "env"
+        hook_env.write_text(
+            "\n".join(
+                [
+                    "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321",
+                    "SUPABASE_SERVICE_KEY='local-service-role'",
+                    "export SUPABASE_SERVICE_ROLE_KEY=local-service-role",
+                    "INVALID-KEY=ignored",
+                ]
+            )
+        )
+        fake_proc = _fake_process(returncode=0, stdout=b"ok\n")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "NEXT_PUBLIC_SUPABASE_URL": "https://hosted.supabase.co",
+                    "SUPABASE_SERVICE_KEY": "hosted-service-role",
+                },
+                clear=False,
+            ),
+            patch(
+                "asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=fake_proc
+            ),
+        ):
+            result = await sup.run_start_script()
+            assert result is True
+            assert os.environ["NEXT_PUBLIC_SUPABASE_URL"] == "http://127.0.0.1:54321"
+            assert os.environ["SUPABASE_SERVICE_KEY"] == "local-service-role"
+            assert os.environ["SUPABASE_SERVICE_ROLE_KEY"] == "local-service-role"
+            assert "INVALID-KEY" not in os.environ
 
 
 class TestStartScriptFailure:
